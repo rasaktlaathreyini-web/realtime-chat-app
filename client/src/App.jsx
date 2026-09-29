@@ -16,7 +16,7 @@ import axios from "axios";
 import { io } from "socket.io-client";
 import "./App.css";
 
-const API_URL = "http://127.0.0.1:5000";
+const API_URL = "https://realtime-chat-app-xj1b.onrender.com";
 
 // =====================================================
 // HELPERS
