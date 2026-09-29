@@ -15,384 +15,126 @@ const User = require("./models/User");
 dotenv.config();
 
 const app = express();
+const server = http.createServer(app);
 
+const allowedOrigins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://realtime-chat-app-client-phwr.onrender.com"
+];
 
-// =====================================================
-// HTTP SERVER
-// =====================================================
-
-const httpServer = http.createServer(app);
-
-
-// =====================================================
-// SOCKET.IO
-// =====================================================
-
-const io = new Server(httpServer, {
-    cors: {
-        origin: [
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-        ],
-        methods: ["GET", "POST"],
+app.use(cors({
+    origin: function(origin, callback) {
+        if (!origin || allowedOrigins.includes(origin)) {
+            return callback(null, true);
+        }
+        return callback(new Error("Not allowed by CORS"));
     },
-});
-
-
-// =====================================================
-// MIDDLEWARE
-// =====================================================
-
-app.use(
-    cors({
-        origin: [
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-        ],
-    })
-);
+    credentials: true
+}));
 
 app.use(express.json());
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-
-// =====================================================
-// STATIC FILES
-// =====================================================
-
-app.use(
-    "/uploads",
-    express.static(
-        path.join(__dirname, "uploads")
-    )
-);
-
-
-// =====================================================
-// ROUTES
-// =====================================================
-
-app.use(
-    "/api/users",
-    userRoutes
-);
-
-app.use(
-    "/api/messages",
-    messageRoutes
-);
-
-app.use(
-    "/api/groups",
-    groupRoutes
-);
-
-app.use(
-    "/api/uploads",
-    uploadRoutes
-);
-
-
-// =====================================================
-// HOME
-// =====================================================
+app.use("/api/users", userRoutes);
+app.use("/api/messages", messageRoutes);
+app.use("/api/groups", groupRoutes);
+app.use("/api/upload", uploadRoutes);
 
 app.get("/", (req, res) => {
-
-    res.json({
-        message:
-            "Real-Time Chat Server is running!",
-    });
-
+    res.json({ message: "Realtime Chat API is running" });
 });
 
+mongoose.connect(process.env.MONGODB_URI)
+    .then(() => console.log("✅ MongoDB connected"))
+    .catch(error => console.error("❌ MongoDB connection error:", error));
 
-// =====================================================
-// ONLINE USERS
-// =====================================================
-
-const onlineUsers = new Map();
-
-
-// =====================================================
-// SOCKET.IO CONNECTION
-// =====================================================
+const io = new Server(server, {
+    cors: {
+        origin: allowedOrigins,
+        methods: ["GET", "POST"],
+        credentials: true
+    }
+});
 
 io.on("connection", (socket) => {
+    console.log("🟢 User connected:", socket.id);
 
-    console.log(
-        "🔌 User connected:",
-        socket.id
-    );
+    socket.on("user-online", async (userId) => {
+        try {
+            if (!userId) return;
 
+            await User.findByIdAndUpdate(userId, {
+                isOnline: true,
+                lastSeen: new Date()
+            });
 
-    // =================================================
-    // USER ONLINE
-    // =================================================
-
-    socket.on(
-        "user-online",
-        async (userId) => {
-
-            try {
-
-                onlineUsers.set(
-                    userId,
-                    socket.id
-                );
-
-                await User.findByIdAndUpdate(
-                    userId,
-                    {
-                        isOnline: true,
-                        lastSeen: new Date(),
-                    }
-                );
-
-                console.log(
-                    "🟢 User online:",
-                    userId
-                );
-
-                io.emit(
-                    "online-users",
-                    Array.from(
-                        onlineUsers.keys()
-                    )
-                );
-
-            } catch (error) {
-
-                console.error(
-                    "❌ Online status error:",
-                    error.message
-                );
-
-            }
-
+            io.emit("user-online", userId);
+            console.log("🟢 User online:", userId);
+        } catch (error) {
+            console.error("❌ Error updating online status:", error);
         }
-    );
+    });
 
+    socket.on("user-offline", async (userId) => {
+        try {
+            if (!userId) return;
 
-    // =================================================
-    // PRIVATE CHAT ROOM
-    // =================================================
+            await User.findByIdAndUpdate(userId, {
+                isOnline: false,
+                lastSeen: new Date()
+            });
 
-    socket.on(
-        "join-private-chat",
-        ({
-            userId,
-            otherUserId,
-        }) => {
-
-            const roomId = [
-                userId,
-                otherUserId,
-            ]
-                .sort()
-                .join("-");
-
-            socket.join(roomId);
-
-            console.log(
-                `💬 Joined private room: ${roomId}`
-            );
-
+            io.emit("user-offline", userId);
+            console.log("🔴 User offline:", userId);
+        } catch (error) {
+            console.error("❌ Error updating offline status:", error);
         }
-    );
+    });
 
+    socket.on("join-room", (roomId) => {
+        if (!roomId) return;
 
-    // =================================================
-    // PRIVATE MESSAGE
-    // =================================================
+        socket.join(roomId);
+        console.log(`👥 User ${socket.id} joined room: ${roomId}`);
+    });
 
-    socket.on(
-        "send-private-message",
-        (message) => {
+    socket.on("send-message", (message) => {
+        try {
+            if (!message || !message.roomId) return;
 
-            const roomId = [
-                message.senderId,
-                message.receiverId,
-            ]
-                .sort()
-                .join("-");
-
-            console.log(
-                "📨 Private message:",
-                roomId
-            );
-
-            io.to(roomId).emit(
-                "receive-private-message",
-                message
-            );
-
+            socket.to(message.roomId).emit("receive-message", message);
+            console.log(`💬 Message sent to room: ${message.roomId}`);
+        } catch (error) {
+            console.error("❌ Error sending message:", error);
         }
-    );
+    });
 
+    socket.on("send-group-message", (message) => {
+        try {
+            if (!message || !message.groupId) return;
 
-    // =================================================
-    // GROUP ROOM
-    // =================================================
-
-    socket.on(
-        "join-group",
-        (groupId) => {
-
-            const roomId =
-                `group-${groupId}`;
-
-            socket.join(roomId);
-
-            console.log(
-                `👥 Joined group room: ${roomId}`
-            );
-
+            socket.to(message.groupId).emit("receive-group-message", message);
+            console.log(`👥 Group message sent to: ${message.groupId}`);
+        } catch (error) {
+            console.error("❌ Error sending group message:", error);
         }
-    );
+    });
 
+    socket.on("join-group", (groupId) => {
+        if (!groupId) return;
 
-    // =================================================
-    // GROUP MESSAGE
-    // =================================================
+        socket.join(groupId);
+        console.log(`👥 User ${socket.id} joined group: ${groupId}`);
+    });
 
-    socket.on(
-        "send-group-message",
-        (message) => {
-
-            const roomId =
-                `group-${message.group}`;
-
-            console.log(
-                "📨 Group message:",
-                roomId
-            );
-
-            io.to(roomId).emit(
-                "receive-group-message",
-                message
-            );
-
-        }
-    );
-
-
-    // =================================================
-    // DISCONNECT
-    // =================================================
-
-    socket.on(
-        "disconnect",
-        async () => {
-
-            console.log(
-                "🔴 User disconnected:",
-                socket.id
-            );
-
-            let disconnectedUser = null;
-
-            for (
-                const [
-                    userId,
-                    socketId,
-                ] of onlineUsers.entries()
-            ) {
-
-                if (
-                    socketId === socket.id
-                ) {
-
-                    disconnectedUser =
-                        userId;
-
-                    break;
-
-                }
-
-            }
-
-
-            if (!disconnectedUser) {
-                return;
-            }
-
-
-            onlineUsers.delete(
-                disconnectedUser
-            );
-
-
-            try {
-
-                await User.findByIdAndUpdate(
-                    disconnectedUser,
-                    {
-                        isOnline: false,
-                        lastSeen: new Date(),
-                    }
-                );
-
-                console.log(
-                    "⚪ User offline:",
-                    disconnectedUser
-                );
-
-                io.emit(
-                    "online-users",
-                    Array.from(
-                        onlineUsers.keys()
-                    )
-                );
-
-            } catch (error) {
-
-                console.error(
-                    "❌ Offline status error:",
-                    error.message
-                );
-
-            }
-
-        }
-    );
-
+    socket.on("disconnect", () => {
+        console.log("🔴 User disconnected:", socket.id);
+    });
 });
 
+const PORT = process.env.PORT || 5000;
 
-// =====================================================
-// MONGODB
-// =====================================================
-
-mongoose
-    .connect(
-        process.env.MONGODB_URI
-    )
-    .then(() => {
-
-        console.log(
-            "✅ MongoDB connected"
-        );
-
-        httpServer.listen(
-            process.env.PORT || 5000,
-            () => {
-
-                console.log(
-                    `🚀 Server running on http://localhost:${process.env.PORT || 5000}`
-                );
-
-            }
-        );
-
-    })
-    .catch((error) => {
-
-        console.error(
-            "❌ MongoDB connection failed:"
-        );
-
-        console.error(
-            error.message
-        );
-
-    });
+server.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+});
